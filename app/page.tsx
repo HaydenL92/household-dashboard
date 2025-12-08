@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, FormEvent } from "react";
+import { useState, useEffect, FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
@@ -52,6 +52,8 @@ function daysBetween(start: Date, end: Date) {
   );
 }
 
+const GROCERY_STORAGE_KEY = "homehub-groceries";
+
 export default function Home() {
   const today = new Date();
   const formattedDate = today.toLocaleDateString(undefined, {
@@ -69,6 +71,33 @@ export default function Home() {
   ]);
   const [newGrocery, setNewGrocery] = useState("");
   const [newGroceryCategory, setNewGroceryCategory] = useState("Produce");
+
+  // ✅ Load groceries from localStorage on first mount
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(GROCERY_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as GroceryItem[];
+        if (Array.isArray(parsed)) {
+          setGroceryItems(parsed);
+        }
+      }
+    } catch {
+      // ignore parse errors and keep defaults
+    }
+  }, []);
+
+  // ✅ Save groceries to localStorage whenever they change
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        GROCERY_STORAGE_KEY,
+        JSON.stringify(groceryItems)
+      );
+    } catch {
+      // ignore write errors
+    }
+  }, [groceryItems]);
 
   // 🔹 Workout plan for the week (0 = Sunday)
   const weeklyWorkout = [
