@@ -27,14 +27,49 @@ type GroceryItem = {
 };
 
 type Reminder = {
+  id: number;
   label: string;
-  lastDone: string; // ISO date string
-  intervalDays: number;
+  last_done: string; // matches API field
+  interval_days: number;
+};
+
+type BudgetState = {
+  week_spend: number;
+  week_limit: number;
 };
 
 const GROCERY_CATEGORIES = ["Produce", "Protein", "Dairy", "Pantry", "Other"];
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+const DEFAULT_REMINDERS: Reminder[] = [
+  {
+    id: 1,
+    label: "Change AC filter",
+    last_done: "2025-10-01",
+    interval_days: 90,
+  },
+  {
+    id: 2,
+    label: "Change Brita filter",
+    last_done: "2025-11-15",
+    interval_days: 60,
+  },
+  {
+    id: 3,
+    label: "Change toothbrushes",
+    last_done: "2025-10-20",
+    interval_days: 90,
+  },
+  {
+    id: 4,
+    label: "Trash night",
+    last_done: "2025-12-07",
+    interval_days: 7,
+  },
+];
+
+const API_BASE = "http://localhost:8001";
 
 function daysBetween(start: Date, end: Date) {
   const startMidnight = new Date(
@@ -52,54 +87,36 @@ function daysBetween(start: Date, end: Date) {
   );
 }
 
-const GROCERY_STORAGE_KEY = "homehub-groceries";
-
 export default function Home() {
   const today = new Date();
+  const todayDateString = today.toISOString().slice(0, 10);
   const formattedDate = today.toLocaleDateString(undefined, {
     weekday: "long",
     month: "short",
     day: "numeric",
   });
 
-  // 🔹 Grocery list state
-  const [groceryItems, setGroceryItems] = useState<GroceryItem[]>([
-    { id: 1, name: "Eggs", done: false, category: "Dairy" },
-    { id: 2, name: "Spinach", done: false, category: "Produce" },
-    { id: 3, name: "Chicken", done: false, category: "Protein" },
-    { id: 4, name: "Coffee", done: false, category: "Pantry" },
-  ]);
+  // ===== GROCERY STATE (backend) =====
+  const [groceryItems, setGroceryItems] = useState<GroceryItem[]>([]);
+  const [loadingGroceries, setLoadingGroceries] = useState(true);
   const [newGrocery, setNewGrocery] = useState("");
   const [newGroceryCategory, setNewGroceryCategory] = useState("Produce");
 
-  // ✅ Load groceries from localStorage on first mount
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(GROCERY_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as GroceryItem[];
-        if (Array.isArray(parsed)) {
-          setGroceryItems(parsed);
-        }
-      }
-    } catch {
-      // ignore parse errors and keep defaults
-    }
-  }, []);
+  // ===== REMINDERS (backend) =====
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [loadingReminders, setLoadingReminders] = useState(true);
+  const [newReminderLabel, setNewReminderLabel] = useState("");
+  const [newReminderInterval, setNewReminderInterval] = useState(30);
 
-  // ✅ Save groceries to localStorage whenever they change
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        GROCERY_STORAGE_KEY,
-        JSON.stringify(groceryItems)
-      );
-    } catch {
-      // ignore write errors
-    }
-  }, [groceryItems]);
+  // ===== BUDGET (backend) =====
+  const [budget, setBudget] = useState<BudgetState | null>(null);
+  const [loadingBudget, setLoadingBudget] = useState(true);
 
-  // 🔹 Workout plan for the week (0 = Sunday)
+  // ===== SETTINGS / WEATHER LOCATION (backend) =====
+  const [weatherLocation, setWeatherLocation] = useState("Your Area");
+  const [savingWeatherLocation, setSavingWeatherLocation] = useState(false);
+
+  // ===== Workout plan for the week (0 = Sunday) =====
   const weeklyWorkout = [
     { name: "Rest / Walk", items: ["Light walk", "Stretching"] }, // Sunday
     {
@@ -130,88 +147,196 @@ export default function Home() {
 
   const todayWorkout = weeklyWorkout[today.getDay()];
 
-  // 🔹 Recurring reminders
-  const reminders: Reminder[] = [
-    {
-      label: "Change AC filter",
-      lastDone: "2025-10-01",
-      intervalDays: 90,
-    },
-    {
-      label: "Change Brita filter",
-      lastDone: "2025-11-15",
-      intervalDays: 60,
-    },
-    {
-      label: "Change toothbrushes",
-      lastDone: "2025-10-20",
-      intervalDays: 90,
-    },
-    {
-      label: "Trash night",
-      lastDone: "2025-12-07",
-      intervalDays: 7,
-    },
-  ];
-
-  // 🔹 Budget (still simple / static for now)
-  const budget = {
-    weekSpend: 120,
-    weekLimit: 200,
-  };
-
+  // Weather data is still placeholder for now,
+  // but uses the backend-stored weatherLocation.
   const weather = {
     temp: "78°F",
     condition: "Partly cloudy",
-    location: "Your Area",
+    location: weatherLocation || "Your Area",
   };
 
-  const budgetPercent = Math.min(
-    100,
-    Math.round((budget.weekSpend / budget.weekLimit) * 100)
-  );
+  const budgetPercent =
+    budget && budget.week_limit > 0
+      ? Math.min(
+          100,
+          Math.round((budget.week_spend / budget.week_limit) * 100)
+        )
+      : 0;
 
-  // 🔹 Grocery handlers
-  function handleAddGrocery(e: FormEvent) {
+  // ===== LOAD FROM BACKEND: groceries =====
+  useEffect(() => {
+    async function loadGroceries() {
+      try {
+        const res = await fetch(`${API_BASE}/groceries`);
+        if (!res.ok) throw new Error("Failed to load groceries");
+        const data = await res.json();
+        setGroceryItems(data);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoadingGroceries(false);
+      }
+    }
+
+    loadGroceries();
+  }, []);
+
+  // ===== LOAD FROM BACKEND: reminders (and seed defaults if empty) =====
+  useEffect(() => {
+    async function loadReminders() {
+      try {
+        const res = await fetch(`${API_BASE}/reminders`);
+        if (!res.ok) throw new Error("Failed to load reminders");
+        let data: Reminder[] = await res.json();
+
+        // If DB is empty, seed with defaults once
+        if (data.length === 0) {
+          const seeded: Reminder[] = [];
+          for (const r of DEFAULT_REMINDERS) {
+            const createRes = await fetch(`${API_BASE}/reminders`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                label: r.label,
+                last_done: r.last_done,
+                interval_days: r.interval_days,
+              }),
+            });
+            if (createRes.ok) {
+              const created = await createRes.json();
+              seeded.push(created);
+            }
+          }
+          data = seeded;
+        }
+
+        setReminders(data);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoadingReminders(false);
+      }
+    }
+
+    loadReminders();
+  }, []);
+
+  // ===== LOAD FROM BACKEND: budget =====
+  useEffect(() => {
+    async function loadBudget() {
+      try {
+        const res = await fetch(`${API_BASE}/budget`);
+        if (!res.ok) throw new Error("Failed to load budget");
+        const data = await res.json();
+        setBudget({
+          week_spend: data.week_spend,
+          week_limit: data.week_limit,
+        });
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoadingBudget(false);
+      }
+    }
+
+    loadBudget();
+  }, []);
+
+  // ===== LOAD FROM BACKEND: settings (weather location) =====
+  useEffect(() => {
+    async function loadSettings() {
+      try {
+        const res = await fetch(`${API_BASE}/settings`);
+        if (!res.ok) throw new Error("Failed to load settings");
+        const data = await res.json();
+        setWeatherLocation(data.weather_location || "Your Area");
+      } catch (err) {
+        console.error(err);
+        setWeatherLocation("Your Area");
+      }
+    }
+
+    loadSettings();
+  }, []);
+
+  // ===== Grocery handlers (backend) =====
+  async function handleAddGrocery(e: FormEvent) {
     e.preventDefault();
+
     const trimmed = newGrocery.trim();
     if (!trimmed) return;
 
-    setGroceryItems((prev) => [
-      ...prev,
-      {
-        id: Date.now(),
-        name: trimmed,
-        done: false,
-        category: newGroceryCategory || "Other",
-      },
-    ]);
-    setNewGrocery("");
+    try {
+      const res = await fetch(`${API_BASE}/groceries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmed,
+          category: newGroceryCategory,
+          done: false,
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to add grocery");
+
+      const created = await res.json();
+      setGroceryItems((prev) => [...prev, created]);
+      setNewGrocery("");
+    } catch (err) {
+      console.error(err);
+    }
   }
 
-  function toggleGrocery(id: number) {
-    setGroceryItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, done: !item.done } : item
-      )
-    );
+  async function toggleGrocery(id: number) {
+    const item = groceryItems.find((g) => g.id === id);
+    if (!item) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/groceries/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ done: !item.done }),
+      });
+
+      if (!res.ok) throw new Error("Failed to update grocery");
+
+      const updated = await res.json();
+      setGroceryItems((prev) =>
+        prev.map((g) => (g.id === id ? updated : g))
+      );
+    } catch (err) {
+      console.error(err);
+    }
   }
 
-  function removeGrocery(id: number) {
-    setGroceryItems((prev) => prev.filter((item) => item.id !== id));
+  async function removeGrocery(id: number) {
+    try {
+      const res = await fetch(`${API_BASE}/groceries/${id}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) throw new Error("Failed to delete grocery");
+
+      setGroceryItems((prev) => prev.filter((g) => g.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
   }
 
-  function clearCompletedGroceries() {
-    setGroceryItems((prev) => prev.filter((item) => !item.done));
+  async function clearCompletedGroceries() {
+    const completed = groceryItems.filter((g) => g.done);
+    for (const item of completed) {
+      await removeGrocery(item.id);
+    }
   }
 
   const remainingCount = groceryItems.filter((g) => !g.done).length;
 
-  // 🔹 Reminder status helpers
+  // ===== Reminder helpers (backend) =====
   function getReminderStatus(reminder: Reminder) {
-    const last = new Date(reminder.lastDone);
+    const last = new Date(reminder.last_done);
     const elapsed = daysBetween(last, today);
-    const daysLeft = reminder.intervalDays - elapsed;
+    const daysLeft = reminder.interval_days - elapsed;
 
     if (daysLeft <= 0) {
       return {
@@ -239,6 +364,120 @@ export default function Home() {
       borderClass: "border-emerald-500/60",
       chipClass: "bg-emerald-500/10 text-emerald-500",
     };
+  }
+
+  async function handleAddReminder(e: FormEvent) {
+    e.preventDefault();
+    const trimmed = newReminderLabel.trim();
+    if (!trimmed || newReminderInterval <= 0) return;
+
+    try {
+      const res = await fetch(`${API_BASE}/reminders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: trimmed,
+          last_done: todayDateString,
+          interval_days: newReminderInterval,
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to add reminder");
+
+      const created = await res.json();
+      setReminders((prev) => [...prev, created]);
+
+      setNewReminderLabel("");
+      setNewReminderInterval(30);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function markReminderDoneToday(id: number) {
+    try {
+      const res = await fetch(`${API_BASE}/reminders/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ last_done: todayDateString }),
+      });
+
+      if (!res.ok) throw new Error("Failed to update reminder");
+
+      const updated = await res.json();
+      setReminders((prev) =>
+        prev.map((r) => (r.id === id ? updated : r))
+      );
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function removeReminder(id: number) {
+    try {
+      const res = await fetch(`${API_BASE}/reminders/${id}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) throw new Error("Failed to delete reminder");
+
+      setReminders((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  // ===== Budget handlers (backend) =====
+  async function updateBudgetField(
+    field: keyof BudgetState,
+    value: string
+  ) {
+    if (!budget) return;
+    const numeric = Number(value);
+    if (Number.isNaN(numeric)) return;
+
+    const updated: BudgetState = {
+      ...budget,
+      [field]: numeric,
+    };
+
+    // Optimistic update
+    setBudget(updated);
+
+    try {
+      const res = await fetch(`${API_BASE}/budget`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: numeric }),
+      });
+
+      if (!res.ok) throw new Error("Failed to update budget");
+      const data = await res.json();
+      setBudget({
+        week_spend: data.week_spend,
+        week_limit: data.week_limit,
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  // ===== Weather location handlers (backend) =====
+  async function saveWeatherLocation() {
+    try {
+      setSavingWeatherLocation(true);
+      const res = await fetch(`${API_BASE}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ weather_location: weatherLocation }),
+      });
+      if (!res.ok) throw new Error("Failed to update settings");
+      // We could read response, but we already have the value locally
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingWeatherLocation(false);
+    }
   }
 
   return (
@@ -332,60 +571,67 @@ export default function Home() {
 
                 {/* List */}
                 <div className="flex-1 overflow-y-auto rounded-md border border-border/50 bg-muted/40 p-2">
-                  <AnimatePresence initial={false}>
-                    {groceryItems.map((item) => (
-                      <motion.div
-                        key={item.id}
-                        layout
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 4 }}
-                        transition={{ duration: 0.15 }}
-                        className="mb-1 last:mb-0"
-                      >
-                        <div
-                          onClick={() => toggleGrocery(item.id)}
-                          className="flex cursor-pointer items-center justify-between rounded-md bg-background/60 px-3 py-2 text-sm hover:bg-background transition-colors"
+                  {loadingGroceries && (
+                    <p className="py-4 text-center text-xs text-muted-foreground">
+                      Loading groceries…
+                    </p>
+                  )}
+                  {!loadingGroceries && (
+                    <AnimatePresence initial={false}>
+                      {groceryItems.map((item) => (
+                        <motion.div
+                          key={item.id}
+                          layout
+                          initial={{ opacity: 0, y: 4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={{ opacity: 0, y: 4 }}
+                          transition={{ duration: 0.15 }}
+                          className="mb-1 last:mb-0"
                         >
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`h-4 w-4 rounded-full border ${
-                                item.done
-                                  ? "border-emerald-500 bg-emerald-500/90"
-                                  : "border-muted-foreground/40 bg-transparent"
-                              }`}
-                            />
-                            <div className="flex flex-col">
-                              <span
-                                className={
-                                  item.done
-                                    ? "text-muted-foreground line-through"
-                                    : ""
-                                }
-                              >
-                                {item.name}
-                              </span>
-                              <span className="text-[10px] text-muted-foreground">
-                                {item.category}
-                              </span>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removeGrocery(item.id);
-                            }}
-                            className="rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-                            aria-label="Remove item"
+                          <div
+                            onClick={() => toggleGrocery(item.id)}
+                            className="flex cursor-pointer items-center justify-between rounded-md bg-background/60 px-3 py-2 text-sm hover:bg-background transition-colors"
                           >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </motion.div>
-                    ))}
-                  </AnimatePresence>
-                  {groceryItems.length === 0 && (
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`h-4 w-4 rounded-full border ${
+                                  item.done
+                                    ? "border-emerald-500 bg-emerald-500/90"
+                                    : "border-muted-foreground/40 bg-transparent"
+                                }`}
+                              />
+                              <div className="flex flex-col">
+                                <span
+                                  className={
+                                    item.done
+                                      ? "text-muted-foreground line-through"
+                                      : ""
+                                  }
+                                >
+                                  {item.name}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground">
+                                  {item.category}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void removeGrocery(item.id);
+                              }}
+                              className="rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                              aria-label="Remove item"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  )}
+                  {!loadingGroceries && groceryItems.length === 0 && (
                     <p className="py-4 text-center text-xs text-muted-foreground">
                       Nothing here yet. Add your first item above 👆
                     </p>
@@ -399,18 +645,44 @@ export default function Home() {
           <motion.div variants={cardVariants}>
             <Card className="h-full">
               <CardHeader className="pb-2">
-                <div className="flex items-center gap-2">
-                  <CloudSun className="h-5 w-5 text-primary" />
-                  <CardTitle className="text-sm">Weather</CardTitle>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <CloudSun className="h-5 w-5 text-primary" />
+                    <CardTitle className="text-sm">Weather</CardTitle>
+                  </div>
+                  {savingWeatherLocation && (
+                    <span className="text-[10px] text-muted-foreground">
+                      Saving…
+                    </span>
+                  )}
                 </div>
               </CardHeader>
-              <CardContent className="space-y-1">
-                <div className="text-3xl font-semibold">{weather.temp}</div>
-                <div className="text-sm text-muted-foreground">
-                  {weather.condition}
+              <CardContent className="space-y-3">
+                <div className="space-y-1">
+                  <div className="text-3xl font-semibold">{weather.temp}</div>
+                  <div className="text-sm text-muted-foreground">
+                    {weather.condition}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {weather.location}
+                  </div>
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  {weather.location}
+                <div className="space-y-1">
+                  <label className="text-[11px] text-muted-foreground">
+                    Location (city or ZIP – backend uses this)
+                  </label>
+                  <Input
+                    value={weatherLocation}
+                    onChange={(e) => setWeatherLocation(e.target.value)}
+                    onBlur={saveWeatherLocation}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="e.g. Houston, TX"
+                    className="text-xs"
+                  />
                 </div>
               </CardContent>
             </Card>
@@ -425,34 +697,105 @@ export default function Home() {
                   <CardTitle className="text-sm">Recurring Reminders</CardTitle>
                 </div>
               </CardHeader>
-              <CardContent className="flex-1 space-y-2">
-                <ul className="space-y-2 text-xs">
-                  {reminders.map((r) => {
-                    const status = getReminderStatus(r);
-                    return (
-                      <li
-                        key={r.label}
-                        className={`rounded-md border px-3 py-2 ${status.borderClass}`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <div className="text-sm font-medium">
-                              {r.label}
+              <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+                <div className="flex-1 space-y-2 overflow-y-auto text-xs">
+                  {loadingReminders && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Loading reminders…
+                    </p>
+                  )}
+                  {!loadingReminders && reminders.length === 0 && (
+                    <p className="text-[11px] text-muted-foreground">
+                      No reminders yet. Add one below 👇
+                    </p>
+                  )}
+                  {!loadingReminders &&
+                    reminders.map((r) => {
+                      const status = getReminderStatus(r);
+                      return (
+                        <div
+                          key={r.id}
+                          className={`rounded-md border px-3 py-2 ${status.borderClass}`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-sm font-medium">
+                                {r.label}
+                              </div>
+                              <div className="text-[11px] text-muted-foreground">
+                                {status.description}
+                              </div>
                             </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {status.description}
+                            <div className="flex flex-col items-end gap-1">
+                              <span
+                                className={`rounded-full px-2 py-1 text-[10px] font-medium ${status.chipClass}`}
+                              >
+                                {status.label}
+                              </span>
+                              <div className="flex gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => void markReminderDoneToday(r.id)}
+                                  className="rounded-full border border-border bg-background px-2 py-1 text-[10px] hover:bg-muted transition-colors"
+                                >
+                                  Done today
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void removeReminder(r.id)}
+                                  className="rounded-full px-2 py-1 text-[10px] text-muted-foreground hover:bg-muted transition-colors"
+                                >
+                                  Remove
+                                </button>
+                              </div>
                             </div>
                           </div>
-                          <span
-                            className={`rounded-full px-2 py-1 text-[10px] font-medium ${status.chipClass}`}
-                          >
-                            {status.label}
-                          </span>
                         </div>
-                      </li>
-                    );
-                  })}
-                </ul>
+                      );
+                    })}
+                </div>
+                {/* Add reminder form */}
+                <form
+                  onSubmit={handleAddReminder}
+                  className="mt-1 space-y-2 border-t border-border pt-2 text-[11px]"
+                >
+                  <div className="flex flex-col gap-1">
+                    <span className="text-muted-foreground">Add reminder</span>
+                    <Input
+                      value={newReminderLabel}
+                      onChange={(e) => setNewReminderLabel(e.target.value)}
+                      placeholder="e.g. Wash bedding"
+                      className="text-xs"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1">
+                      <span className="text-[11px] text-muted-foreground">
+                        Every
+                      </span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={newReminderInterval}
+                        onChange={(e) =>
+                          setNewReminderInterval(
+                            Number(e.target.value) || 1
+                          )
+                        }
+                        className="h-8 w-16 text-xs"
+                      />
+                      <span className="text-[11px] text-muted-foreground">
+                        days
+                      </span>
+                    </div>
+                    <button
+                      type="submit"
+                      className="ml-auto rounded-md bg-primary px-3 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </form>
               </CardContent>
             </Card>
           </motion.div>
@@ -493,30 +836,72 @@ export default function Home() {
                   <CardTitle className="text-sm">This Week&apos;s Budget</CardTitle>
                 </div>
               </CardHeader>
-              <CardContent className="space-y-2">
-                <div className="flex items-baseline justify-between text-sm">
-                  <span className="text-muted-foreground">Spent</span>
-                  <span className="font-semibold">
-                    ${budget.weekSpend} / ${budget.weekLimit}
-                  </span>
-                </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className={`h-2 rounded-full ${
-                      budgetPercent > 90
-                        ? "bg-red-500"
-                        : budgetPercent > 70
-                        ? "bg-yellow-500"
-                        : "bg-emerald-500"
-                    } transition-all`}
-                    style={{ width: `${budgetPercent}%` }}
-                  />
-                </div>
-                <div className="text-[11px] text-muted-foreground">
-                  {budgetPercent <= 100
-                    ? `${budgetPercent}% of your weekly limit`
-                    : `Over budget by ${budgetPercent - 100}%`}
-                </div>
+              <CardContent className="space-y-3">
+                {loadingBudget && (
+                  <p className="text-xs text-muted-foreground">
+                    Loading budget…
+                  </p>
+                )}
+                {!loadingBudget && (
+                  <>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-muted-foreground">Spent</span>
+                        <span className="font-semibold">
+                          ${budget?.week_spend.toFixed(2) ?? "0.00"} / $
+                          {budget?.week_limit.toFixed(2) ?? "0.00"}
+                        </span>
+                      </div>
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-2 rounded-full ${
+                            budgetPercent > 90
+                              ? "bg-red-500"
+                              : budgetPercent > 70
+                              ? "bg-yellow-500"
+                              : "bg-emerald-500"
+                          } transition-all`}
+                          style={{ width: `${budgetPercent}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {budgetPercent <= 100
+                          ? `${budgetPercent}% of your weekly limit`
+                          : `Over budget by ${budgetPercent - 100}%`}
+                      </div>
+                    </div>
+                    <div className="space-y-2 text-[11px]">
+                      <div className="space-y-1">
+                        <span className="text-muted-foreground">
+                          Adjust weekly limit
+                        </span>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={budget?.week_limit ?? ""}
+                          onChange={(e) =>
+                            updateBudgetField("week_limit", e.target.value)
+                          }
+                          className="h-8 text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-muted-foreground">
+                          Update spent this week
+                        </span>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={budget?.week_spend ?? ""}
+                          onChange={(e) =>
+                            updateBudgetField("week_spend", e.target.value)
+                          }
+                          className="h-8 text-xs"
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
               </CardContent>
             </Card>
           </motion.div>
